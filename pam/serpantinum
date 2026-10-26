@@ -1,0 +1,4 @@
+# serpantinum-greeter: substack (no include) para que el "sufficient" de system-auth no corte la línea del llavero (igual que GDM)
+auth        substack     system-auth
+-auth       optional     pam_gnome_keyring.so auto_start
+account     include      system-auth

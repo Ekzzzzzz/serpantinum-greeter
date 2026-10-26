@@ -1,0 +1,9 @@
+# Configuración FINAL de greetd: el login de Serpantinum en la VT 1 (la del arranque).
+# Se instala como /etc/greetd/config.toml (el original queda en config.toml.original).
+# Vuelta atrás desde una TTY:  sudo systemctl disable greetd && sudo systemctl enable sddm && sudo reboot
+[terminal]
+vt = 1
+
+[default_session]
+command = "/usr/local/bin/serpantinum-greeter-launch"
+user = "greetd"

@@ -1,0 +1,38 @@
+#!/bin/sh
+# Lanza el login de Serpantinum dentro de cage (kiosk: una sola app, sin atajos ni lanzador).
+# Lo ejecuta greetd como el usuario "greetd" (sin shell, sin privilegios).
+# Si el login gráfico falla, cae a agreety (login en modo texto) para nunca quedar sin forma de entrar.
+
+export XKB_DEFAULT_LAYOUT=latam
+export XCURSOR_THEME=Adwaita
+export XCURSOR_SIZE=24
+export QT_QPA_PLATFORM=wayland
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+export QT_IM_MODULE=none
+# Menos registros: Quickshell anota en depuración cada mensaje que el login intercambia con greetd
+# (la respuesta a la contraseña ya sale como "<CENSORED>"). Sin depuración y sin registro detallado
+# (--no-detailed-logs), el login deja el mínimo rastro posible en el journal y en /run.
+export QT_LOGGING_RULES="*.debug=false"
+
+# Usuario que muestra el login: el usuario humano de la computadora (o SG_USER, si se define).
+# Si no hay ninguno, el login gráfico no tendría a quién abrir sesión: se usa el de texto.
+SG_USER="$(/usr/local/bin/serpantinum-greeter-user)"
+export SG_USER
+if [ -z "$SG_USER" ]; then
+    echo "No se encontró un usuario para el login; usando el login en modo texto." >&2
+    exec agreety --cmd /usr/bin/start-hyprland
+fi
+
+# Limpia la consola de la VT y oculta su cursor: lo que quede ahí se ve un instante
+# cuando el login se cierra y antes de que la sesión dibuje.
+printf '\033[2J\033[3J\033[H\033[?25l' 2>/dev/null
+
+# -d: sin barra de título · -s: permite Ctrl+Alt+F1..F6 (las TTY piden contraseña igual)
+# -m extend: usa todos los monitores; el login va en el principal y los demás muestran su fondo
+# Antes de abrir el login, se ordenan los monitores como en Hyprland (HDMI a la izquierda)
+# systemd-cat: los mensajes de cage (azules) y de Quickshell (verdes) van al journal, no a la pantalla
+# (journalctl -t serpantinum-greeter)
+systemd-cat -t serpantinum-greeter cage -d -s -m extend -- sh -c '/usr/local/bin/serpantinum-greeter-layout; exec quickshell --no-detailed-logs --log-rules "*.debug=false" -p /usr/local/share/serpantinum-greeter' && exit 0
+
+echo "El login gráfico falló; usando el login en modo texto." >&2
+exec agreety --cmd /usr/bin/start-hyprland

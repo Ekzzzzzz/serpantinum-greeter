@@ -1,0 +1,14 @@
+#!/bin/sh
+# Ordena los monitores dentro de cage como en Hyprland (monitors.lua):
+# el de la izquierda (HDMI) en 0,0 y el de la derecha (laptop) justo a su lado.
+# Si solo hay un monitor conectado, no hace nada.
+IZQ="${SG_IZQ:-HDMI-A-1}"
+DER="${SG_DER:-eDP-1}"
+
+json=$(wlr-randr --json 2>/dev/null) || exit 0
+ancho=$(printf '%s' "$json" | jq -r --arg n "$IZQ" \
+    '.[] | select(.name == $n and .enabled) | ((.modes[] | select(.current) | .width) / .scale | floor)')
+hay_der=$(printf '%s' "$json" | jq -r --arg n "$DER" '.[] | select(.name == $n and .enabled) | .name')
+
+[ -n "$ancho" ] && [ -n "$hay_der" ] || exit 0
+wlr-randr --output "$IZQ" --pos 0,0 --output "$DER" --pos "$ancho",0

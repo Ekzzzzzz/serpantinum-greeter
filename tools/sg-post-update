@@ -1,0 +1,257 @@
+#!/usr/bin/env bash
+# sg-post-update: revisa (y con --arreglar repara) lo que una actualización de Serpantinum puede romper
+# en un sistema que usa serpantinum-greeter (greetd) como login.
+#
+#   sg-post-update             solo revisa e informa (no cambia nada)
+#   sg-post-update --arreglar  además:
+#       · vuelve a poner greetd como gestor de login si el instalador activó otro (SDDM, GDM…)
+#       · restaura /etc/pam.d/serpantinum desde pam/serpantinum y lo prueba con pamtester;
+#         si la contraseña no entra, deja el archivo como estaba (nunca queda un PAM sin probar)
+#
+# Ejecutarlo como tu usuario (no con sudo): pide sudo solo cuando hace falta.
+# Código de salida: 0 = todo bien · 1 = hay avisos · 2 = hay problemas · 64 = uso incorrecto.
+#
+# Variables solo para las pruebas automáticas (tools/test-sg-post-update.sh):
+#   SG_ROOT, SG_REPO, SG_SUDO, SG_PAMTESTER, SG_SYSTEMCTL, SG_USERCTL, SG_JOURNALCTL, SG_RFKILL, SG_QUICKSHELL
+set -uo pipefail
+
+ARREGLAR=false
+case "${1:-}" in
+    "") ;;
+    --arreglar) ARREGLAR=true ;;
+    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "sg-post-update: opción desconocida: $1 (usa --arreglar o --help)" >&2; exit 64 ;;
+esac
+if [ "$(id -u)" -eq 0 ] && [ -z "${SG_ROOT:-}" ]; then
+    echo "sg-post-update: ejecútalo como tu usuario, no con sudo (revisa tu \$HOME)" >&2
+    exit 64
+fi
+
+ROOT="${SG_ROOT:-}"
+REPO="${SG_REPO:-$HOME/src/serpantinum-greeter}"
+SUDO="${SG_SUDO-sudo}"
+PAMTESTER="${SG_PAMTESTER:-pamtester}"
+SYSTEMCTL="${SG_SYSTEMCTL:-systemctl}"
+JOURNALCTL="${SG_JOURNALCTL:-journalctl}"
+RFKILL="${SG_RFKILL:-rfkill}"
+USERCTL="${SG_USERCTL:-systemctl}"
+QUICKSHELL="${SG_QUICKSHELL:-$(command -v quickshell || true)}"
+YO="$(id -un)"
+
+if [ -t 1 ]; then V=$'\e[32m' A=$'\e[33m' R=$'\e[31m' N=$'\e[1m' F=$'\e[0m'; else V='' A='' R='' N='' F=''; fi
+avisos=0
+fallos=0
+ok()    { printf '  %s✅%s %s\n' "$V" "$F" "$*"; }
+aviso() { printf '  %s⚠️%s  %s\n' "$A" "$F" "$*"; avisos=$((avisos + 1)); }
+fallo() { printf '  %s❌%s %s\n' "$R" "$F" "$*"; fallos=$((fallos + 1)); }
+info()  { printf '  ·  %s\n' "$*"; }
+titulo(){ printf '\n%s%s%s\n' "$N" "$*" "$F"; }
+
+tmpdir=""
+trap '[ -n "$tmpdir" ] && rm -rf "$tmpdir"' EXIT
+
+# ¿Se puede usar sudo? Sin --arreglar nunca pide contraseña: solo usa sudo si ya está en caché.
+puede_sudo() {
+    [ -z "$SUDO" ] && return 0
+    $SUDO -n true 2>/dev/null && return 0
+    $ARREGLAR && $SUDO -v
+}
+
+titulo "Serpantinum"
+ver=$(awk -F'"' '/^SERPANTINUM_VERSION=/{print $2}' "$HOME/.local/state/serpantinum/version" 2>/dev/null)
+info "versión instalada: ${ver:-desconocida}"
+if [ ! -d "$REPO" ]; then
+    fallo "no encuentro el repositorio en $REPO (define SG_REPO)"
+fi
+
+# ---------------------------------------------------------------------------------------------
+titulo "1. Gestor de login (greetd)"
+dm_link="$ROOT/etc/systemd/system/display-manager.service"
+dm=$(readlink "$dm_link" 2>/dev/null)
+if [[ "$dm" == */greetd.service ]]; then
+    ok "display-manager → greetd"
+elif ! $ARREGLAR; then
+    aviso "el gestor de login es: ${dm:-ninguno}. Para volver a greetd: sg-post-update --arreglar"
+elif puede_sudo; then
+    otro=$(basename "${dm:-}")
+    info "el gestor de login era: ${otro:-ninguno} → volviendo a greetd"
+    # Primero se desactiva el que ocupa el puesto (los dos se declaran Alias=display-manager.service)
+    [ -n "$otro" ] && $SUDO "$SYSTEMCTL" disable "$otro" 2>/dev/null
+    $SUDO "$SYSTEMCTL" enable greetd.service 2>/dev/null
+    dm=$(readlink "$dm_link" 2>/dev/null)
+    if [[ "$dm" == */greetd.service ]]; then
+        ok "display-manager → greetd (arreglado; se aplica al reiniciar)"
+    else
+        fallo "no se pudo volver a greetd (el gestor es: ${dm:-ninguno})"
+    fi
+else
+    fallo "hace falta sudo para volver a greetd"
+fi
+
+# ---------------------------------------------------------------------------------------------
+titulo "2. PAM de la pantalla de bloqueo (/etc/pam.d/serpantinum)"
+ref="$REPO/pam/serpantinum"
+pam="$ROOT/etc/pam.d/serpantinum"
+if [ ! -f "$ref" ]; then
+    fallo "falta la versión de referencia: $ref"
+elif cmp -s "$ref" "$pam"; then
+    ok "es la versión de referencia (substack + llavero)"
+else
+    if [ -f "$pam" ]; then
+        info "es distinto a la referencia (el instalador de Serpantinum lo reescribe):"
+        diff "$ref" "$pam" | sed 's/^/       /'
+    else
+        info "no existe (la pantalla de bloqueo usaría el PAM por defecto)"
+    fi
+    if ! $ARREGLAR; then
+        aviso "para restaurarlo: sg-post-update --arreglar"
+    elif ! command -v "$PAMTESTER" >/dev/null 2>&1; then
+        fallo "falta pamtester (sudo dnf install pamtester): sin probar la contraseña no se cambia nada"
+    elif [ ! -t 0 ] && [ -z "${SG_ROOT:-}" ]; then
+        fallo "hace falta una terminal para escribir la contraseña de prueba: no se cambió nada"
+    elif puede_sudo; then
+        resp=""
+        if [ -f "$pam" ]; then
+            resp="$pam.instalador-$(date +%Y%m%d-%H%M%S)"
+            $SUDO cp -a "$pam" "$resp"
+            info "respaldo de la versión anterior: $resp"
+        fi
+        $SUDO install -m 644 "$ref" "$pam"
+        info "probando la contraseña con pamtester (escríbela; no se muestra):"
+        if "$PAMTESTER" serpantinum "$YO" authenticate; then
+            ok "restaurado y probado"
+        else
+            # Regla del candado: nunca dejar un PAM con el que la contraseña no entra
+            if [ -n "$resp" ]; then
+                $SUDO cp -a "$resp" "$pam"
+                fallo "pamtester falló: se devolvió la versión anterior (el bloqueo sigue como estaba)"
+            else
+                $SUDO rm -f "$pam"
+                fallo "pamtester falló: se quitó el archivo (el bloqueo vuelve al PAM por defecto)"
+            fi
+        fi
+    else
+        fallo "hace falta sudo para restaurar el PAM"
+    fi
+fi
+
+# ---------------------------------------------------------------------------------------------
+titulo "3. El login instalado es igual al del repositorio"
+declare -A archivos=(
+    ["shell.qml"]="/usr/local/share/serpantinum-greeter/shell.qml"
+    ["Greeter.qml"]="/usr/local/share/serpantinum-greeter/Greeter.qml"
+    ["Fondo.qml"]="/usr/local/share/serpantinum-greeter/Fondo.qml"
+    ["greetd/serpantinum-greeter-launch"]="/usr/local/bin/serpantinum-greeter-launch"
+    ["greetd/serpantinum-greeter-layout"]="/usr/local/bin/serpantinum-greeter-layout"
+    ["greetd/serpantinum-greeter-user"]="/usr/local/bin/serpantinum-greeter-user"
+    ["greetd/config.toml"]="/etc/greetd/config.toml"
+)
+if [ -d "$REPO" ]; then
+    distintos=0
+    for src in "${!archivos[@]}"; do
+        if ! cmp -s "$REPO/$src" "$ROOT${archivos[$src]}"; then
+            aviso "distinto o faltante: ${archivos[$src]}"
+            distintos=$((distintos + 1))
+        fi
+    done
+    if [ "$distintos" -eq 0 ]; then ok "los ${#archivos[@]} archivos coinciden"; fi
+fi
+
+# ---------------------------------------------------------------------------------------------
+titulo "4. Registros del login"
+if [ -n "$QUICKSHELL" ] && [ -x "$QUICKSHELL" ]; then
+    info "$("$QUICKSHELL" --version 2>/dev/null | head -1)"
+    # Se busca en el binario sin tubería: con pipefail, "strings | grep -q" falla aunque encuentre (SIGPIPE)
+    if grep -a -q -- '--no-detailed-logs' "$QUICKSHELL"; then
+        ok "Quickshell tiene --no-detailed-logs"
+    else
+        aviso "esta versión de Quickshell no tiene --no-detailed-logs: el lanzador fallaría (cae a agreety)"
+    fi
+else
+    fallo "no encuentro quickshell"
+fi
+lanzador="$ROOT/usr/local/bin/serpantinum-greeter-launch"
+if grep -q -- '--no-detailed-logs' "$lanzador" 2>/dev/null && grep -q 'debug=false' "$lanzador" 2>/dev/null; then
+    ok "el lanzador apaga la depuración"
+else
+    fallo "el lanzador no apaga la depuración"
+fi
+# Si el journal no se puede leer, contar 0 sería un falso ✅: se exige ver mensajes del login
+registro=$("$JOURNALCTL" -b -t serpantinum-greeter --no-pager -o cat 2>/dev/null)
+lineas=$(grep -c . <<< "$registro")
+# Quickshell registra el envío de la respuesta con el valor censurado ("<CENSORED>"):
+# solo cuenta como filtración una respuesta que NO esté censurada.
+n=$(grep -a 'post_auth_message_response' <<< "$registro" | grep -a -c -v '"response":"<CENSORED>"')
+if [ "$lineas" -eq 0 ]; then
+    aviso "no hay mensajes del login en este arranque (¿el journal no se puede leer?): no se pudo comprobar"
+elif [ "$n" -eq 0 ]; then
+    ok "ninguna contraseña sin censurar en el journal de este arranque ($lineas mensajes del login revisados)"
+else
+    fallo "$n respuestas SIN censurar en el journal (deberían decir <CENSORED>): revisa la versión de Quickshell"
+fi
+
+# ---------------------------------------------------------------------------------------------
+titulo "5. Audio y Bluetooth"
+pw=( "$ROOT"/etc/systemd/user/default.target.wants/pipewire.service "$ROOT"/etc/systemd/user/default.target.wants/pipewire-pulse.service )
+encontrados=0
+for f in "${pw[@]}"; do [ -e "$f" ] || [ -L "$f" ] && encontrados=$((encontrados + 1)); done
+if [ "$encontrados" -gt 0 ]; then
+    aviso "PipeWire está activado para todos los usuarios (el login tomaría el Bluetooth): borra $ROOT/etc/systemd/user/default.target.wants/pipewire*.service"
+else
+    ok "PipeWire no arranca para todos los usuarios"
+fi
+if [ -z "$SUDO" ] || $SUDO -n true 2>/dev/null; then
+    faltan=0
+    for u in pipewire.socket pipewire.service pipewire-pulse.socket pipewire-pulse.service wireplumber.service; do
+        [ "$($SUDO readlink "$ROOT/var/lib/greetd/.config/systemd/user/$u" 2>/dev/null)" = /dev/null ] || faltan=$((faltan + 1))
+    done
+    if [ "$faltan" -eq 0 ]; then ok "el usuario greetd tiene PipeWire enmascarado"; else aviso "faltan $faltan máscaras de PipeWire para el usuario greetd"; fi
+else
+    info "máscaras de PipeWire del usuario greetd: no se revisan sin sudo (ejecuta antes: sudo -v)"
+fi
+if command -v "$RFKILL" >/dev/null 2>&1; then
+    rf=$("$RFKILL" list bluetooth 2>/dev/null)
+    if grep -q 'Soft blocked: yes' <<< "$rf"; then
+        aviso "el Bluetooth está bloqueado por rfkill: rfkill unblock bluetooth"
+    elif grep -q 'Soft blocked: no' <<< "$rf"; then
+        ok "el Bluetooth no está bloqueado"
+    else
+        info "no hay adaptador Bluetooth"
+    fi
+else
+    info "rfkill no está instalado: no se revisa el Bluetooth"
+fi
+for s in sg-bt-agent.service sg-sync.path; do
+    if "$USERCTL" --user is-active --quiet "$s"; then ok "$s activo"; else aviso "$s no está activo"; fi
+done
+
+# ---------------------------------------------------------------------------------------------
+titulo "6. Capa personal (~/.config/hypr) frente al último respaldo"
+respaldos=( "$HOME"/respaldo-pre-*/home.tar.gz )
+if [ -f "${respaldos[-1]}" ]; then
+    ultimo="${respaldos[-1]}"
+    tmpdir=$(mktemp -d)
+    if tar -xzf "$ultimo" -C "$tmpdir" .config/hypr 2>/dev/null; then
+        nombre=$(basename "$(dirname "$ultimo")")
+        if diff -rq "$tmpdir/.config/hypr" "$HOME/.config/hypr" >/dev/null 2>&1; then
+            ok "igual a $nombre"
+        else
+            aviso "cambió desde $nombre (normal si la editaste tú):"
+            diff -rq "$tmpdir/.config/hypr" "$HOME/.config/hypr" 2>&1 | sed "s|$tmpdir/||g; s|$HOME/||g; s/^/       /" | head -10
+        fi
+    else
+        info "el respaldo no tiene .config/hypr"
+    fi
+else
+    info "no hay respaldo para comparar (~/respaldo-pre-*/home.tar.gz)"
+fi
+
+# ---------------------------------------------------------------------------------------------
+titulo "Resumen"
+if [ "$fallos" -gt 0 ]; then
+    printf '  %s%d problema(s) y %d aviso(s). No reinicies hasta revisarlos.%s\n' "$R" "$fallos" "$avisos" "$F"; exit 2
+elif [ "$avisos" -gt 0 ]; then
+    printf '  %s%d aviso(s).%s\n' "$A" "$avisos" "$F"; exit 1
+else
+    printf '  %sTodo en orden.%s\n' "$V" "$F"; exit 0
+fi

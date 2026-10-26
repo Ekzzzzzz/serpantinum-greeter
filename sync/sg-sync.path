@@ -1,0 +1,10 @@
+[Unit]
+Description=Vigilar el fondo y el clima de Serpantinum para el login
+
+[Path]
+PathChanged=%h/.cache/serpantinum/wallpaper/current_wallpaper.png
+PathChanged=%h/.cache/serpantinum/weather/weather.json
+Unit=sg-sync.service
+
+[Install]
+WantedBy=default.target

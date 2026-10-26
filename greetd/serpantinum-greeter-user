@@ -1,0 +1,20 @@
+#!/bin/sh
+# Imprime el usuario que mostrará el login: el usuario "humano" de la computadora.
+#   humano = UID entre UID_MIN y UID_MAX (/etc/login.defs) y con un shell válido (/etc/shells),
+#            así quedan fuera las cuentas de sistema y las que tienen nologin o false.
+# Si hay varios, elige el de UID más bajo (el primero que se creó). Si no hay ninguno, no imprime nada.
+# SG_USER manda sobre la detección. SG_PASSWD, SG_LOGINDEFS y SG_SHELLS existen solo para las pruebas.
+if [ -n "${SG_USER:-}" ]; then
+    printf '%s\n' "$SG_USER"
+    exit 0
+fi
+defs="${SG_LOGINDEFS:-/etc/login.defs}"
+shells="${SG_SHELLS:-/etc/shells}"
+min=$(awk '$1 == "UID_MIN" {print $2}' "$defs" 2>/dev/null)
+max=$(awk '$1 == "UID_MAX" {print $2}' "$defs" 2>/dev/null)
+if [ -n "${SG_PASSWD:-}" ]; then usuarios=$(cat "$SG_PASSWD"); else usuarios=$(getent passwd); fi
+printf '%s\n' "$usuarios" | awk -F: -v min="${min:-1000}" -v max="${max:-60000}" -v shells="$shells" '
+    BEGIN { while ((getline s < shells) > 0) if (s !~ /^#/ && s != "") ok[s] = 1 }
+    $3 >= min && $3 <= max && ($7 in ok) && $1 ~ /^[a-z_][a-z0-9_.-]*$/ {
+        if (mejor == "" || $3 < uid) { mejor = $1; uid = $3 } }
+    END { if (mejor != "") print mejor }'

@@ -1,0 +1,9 @@
+[Unit]
+Description=Copiar al login el fondo del escritorio y la temperatura
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/sg-sync
+
+[Install]
+WantedBy=default.target

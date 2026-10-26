@@ -1,0 +1,9 @@
+# Configuración de PRUEBA de greetd: corre en la VT 5 y NO reemplaza a SDDM.
+# Se lanza a mano:  sudo systemd-run --unit=greetd-prueba -p KeyringMode=shared /usr/bin/greetd --config /etc/greetd/prueba.toml
+# Se detiene con:   sudo systemctl stop greetd-prueba
+[terminal]
+vt = 5
+
+[default_session]
+command = "/usr/local/bin/serpantinum-greeter-launch"
+user = "greetd"
