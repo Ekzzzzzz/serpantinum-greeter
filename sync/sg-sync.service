@@ -1,8 +1,14 @@
 [Unit]
 Description=Copiar al login el fondo del escritorio y la temperatura
+# Serpantinum escribe el fondo varias veces seguidas (al elegirlo con SUPER + W y al arrancar).
+# Con el límite por defecto (5 arranques en 10 s), systemd también apaga sg-sync.path, y el login
+# se queda con un fondo viejo hasta el próximo inicio de sesión. Copiar es barato e idempotente.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
+# Espera a que termine la ráfaga: los cambios de ese segundo entran en la misma copia
+ExecStartPre=/usr/bin/sleep 1
 ExecStart=%h/.local/bin/sg-sync
 
 [Install]
